@@ -1,7 +1,8 @@
 # License: BSD 3 clause
 
-from math import sqrt
 import numpy as np
+from warnings import warn
+from math import sqrt, floor, log2
 from scipy.stats import chi
 
 from sklearn.base import BaseEstimator
@@ -17,25 +18,26 @@ class Fastfood(BaseEstimator, TransformerMixin):
 
     Fastfood replaces the random matrix of Random Kitchen Sinks (RBFSampler)
     with an approximation that uses the Walsh-Hadamard transformation to gain
-    significant speed and storage advantages.  The computational complexity for
-    mapping a single example is O(n_components log d).  The space complexity is
-    O(n_components).  Hint: n_components should be a power of two. If this is
-    not the case, the next higher number that fulfills this constraint is
-    chosen automatically.
+    significant speed and storage advantages. The computational complexity for
+    mapping a single example is O(n_components log d). The space complexity is
+    O(n_components).
 
     Parameters
     ----------
     sigma : float
         Parameter of RBF kernel: exp(-(1/(2*sigma^2)) * x^2)
 
-    n_components : int
+    n_components : int, default=128
         Number of Monte Carlo samples per original feature.
         Equals the dimensionality of the computed feature space.
+        n_components should be a power of two. If this is
+        not the case, the next higher number that fulfills this constraint is
+        chosen automatically.
 
-    tradeoff_mem_accuracy : "accuracy" or "mem", default: 'accuracy'
-        mem:        This version is not as accurate as the option "accuracy",
+    tradeoff_mem_accuracy : 'accuracy' or 'mem', default: 'mem'
+        'mem':        This version is not as accurate as the option 'accuracy',
                     but is consuming less memory.
-        accuracy:   The final feature space is of dimension 2*n_components,
+        'accuracy':   The final feature space is of dimension 2*n_components,
                     while being more accurate and consuming more memory.
 
     random_state : {int, RandomState}, optional
@@ -57,9 +59,9 @@ class Fastfood(BaseEstimator, TransformerMixin):
 
     def __init__(
         self,
-        sigma=sqrt(1 / 2),
+        sigma=sqrt(0.5),
         n_components=100,
-        tradeoff_mem_accuracy="accuracy",
+        tradeoff_mem_accuracy='mem',
         random_state=None,
     ):
         self.sigma = sigma
@@ -68,6 +70,8 @@ class Fastfood(BaseEstimator, TransformerMixin):
         # map to 2*n_components features or to n_components features with less
         # accuracy
         self.tradeoff_mem_accuracy = tradeoff_mem_accuracy
+        if self.tradeoff_mem_accuracy == 'accuracy':
+            warn(f"In 'accuracy' case output shape will be (n_samplers, 2*n_components)")
 
     @staticmethod
     def _is_number_power_of_two(n):
@@ -77,13 +81,14 @@ class Fastfood(BaseEstimator, TransformerMixin):
     def _enforce_dimensionality_constraints(d, n):
         if not (Fastfood._is_number_power_of_two(d)):
             # find d that fulfills 2^l
-            d = np.power(2, np.floor(np.log2(d)) + 1)
+            d = 2 ** (floor(log2(d)) + 1)
         divisor, remainder = divmod(n, d)
         times_to_stack_v = int(divisor)
         if remainder != 0:
             # output info, that we increase n so that d is a divider of n
             n = (divisor + 1) * d
             times_to_stack_v = int(divisor + 1)
+            warn(f"n_components will be changed from {self.n_components} to {n}")
         return int(d), int(n), times_to_stack_v
 
     def _pad_with_zeros(self, X):
@@ -91,7 +96,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
             X_padded = np.pad(
                 X,
                 ((0, 0), (0, self._number_of_features_to_pad_with_zeros)),
-                "constant",
+                'constant',
             )
         except AttributeError:
             zeros = np.zeros(
@@ -107,10 +112,10 @@ class Fastfood(BaseEstimator, TransformerMixin):
 
     @staticmethod
     def _l2norm_along_axis1(X):
-        return np.sqrt(np.einsum("ij,ij->i", X, X))
+        return np.sqrt(np.einsum('ij,ij->i', X, X))
 
     def _uniform_vector(self, rng):
-        if self.tradeoff_mem_accuracy != "accuracy":
+        if self.tradeoff_mem_accuracy != 'accuracy':
             return rng.uniform(0, 2 * np.pi, size=self._n)
         else:
             return None
@@ -125,7 +130,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
         )
         Fastfood._approx_fourier_transformation_multi_dim(result)
         result = result.reshape((num_examples, -1))
-        np.take(result, P, axis=1, mode="wrap", out=result)
+        np.take(result, P, axis=1, mode='wrap', out=result)
         np.multiply(
             np.ravel(G), result.reshape(num_examples, self._n), out=result
         )
@@ -136,19 +141,13 @@ class Fastfood(BaseEstimator, TransformerMixin):
     def _scale_transformed_data(self, S, VX):
         """Scale mapped data VX to match kernel(e.g. RBF-Kernel)"""
         VX = VX.reshape(-1, self._times_to_stack_v * self._d)
-
-        return (
-            1 / (self.sigma * np.sqrt(self._d)) * np.multiply(np.ravel(S), VX)
-        )
+        return np.multiply(np.ravel(S), VX) / (self.sigma * sqrt(self._d))
 
     def _phi(self, X):
-        if self.tradeoff_mem_accuracy == "accuracy":
-            return (1 / np.sqrt(X.shape[1])) * np.hstack(
-                [np.cos(X), np.sin(X)]
-            )
+        if self.tradeoff_mem_accuracy == 'accuracy':
+            return np.hstack([np.cos(X), np.sin(X)]) / sqrt(X.shape[1])
         else:
-            np.cos(X + self._U, X)
-            return X * np.sqrt(2.0 / X.shape[1])
+            return np.cos(X + self._U) * sqrt(2. / X.shape[1])
 
     def fit(self, X, y=None):
         """Fit the model with X.
@@ -167,7 +166,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
         self : object
             Returns the transformer.
         """
-        X = check_array(X, order="C", dtype=np.float64)
+        X = check_array(X, order='C', dtype=np.float64)
 
         d_orig = X.shape[1]
         rng = check_random_state(self.random_state)
@@ -217,7 +216,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
         -------
         X_new : array-like, shape (n_samples, n_components)
         """
-        X = check_array(X, order="C", dtype=np.float64)
+        X = check_array(X, order='C', dtype=np.float64)
         X_padded = self._pad_with_zeros(X)
         HGPHBX = self._apply_approximate_gaussian_matrix(
             self._B, self._G, self._P, X_padded
