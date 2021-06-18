@@ -60,7 +60,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         sigma=sqrt(0.5),
-        n_components=100,
+        n_components=128,
         tradeoff_mem_accuracy='mem',
         random_state=None,
     ):
